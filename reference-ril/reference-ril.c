@@ -43,7 +43,7 @@
 #define MAX_AT_RESPONSE 0x1000
 
 /* pathname returned from RIL_REQUEST_SETUP_DATA_CALL / RIL_REQUEST_SETUP_DEFAULT_PDP */
-#define PPP_TTY_PATH "eth0"
+#define PPP_TTY_PATH "/dev/ppp0"
 
 #ifdef USE_TI_COMMANDS
 
@@ -244,7 +244,8 @@ static void onSIMReady()
      * ds = 1   // Status reports routed to TE
      * bfr = 1  // flush buffer
      */
-    at_send_command("AT+CNMI=1,2,2,1,1", NULL);
+    at_send_command("AT+CNMI=1,2,2,1,0", NULL);
+    LOGI ("######### SIM READY !!\n");
 }
 
 static void requestRadioPower(void *data, size_t datalen, RIL_Token t)
@@ -456,8 +457,31 @@ static void requestOrSendDataCallList(RIL_Token *t)
                 /* I don't know where we are, so use the public Google DNS
                  * servers by default and no gateway.
                  */
-                responses[i].dnses = "8.8.8.8 8.8.4.4";
-                responses[i].gateways = "";
+                int c;
+                char ppp_dnses[(PROP_VALUE_MAX * 2) + 3] = "";
+                char ppp_local_ip[PROP_VALUE_MAX] = "";
+                char ppp_dns1[PROP_VALUE_MAX] = "8.8.8.8";
+                char ppp_dns2[PROP_VALUE_MAX] = "8.8.4.4";
+                char ppp_gw[PROP_VALUE_MAX] = "";
+                for (c = 0; c < 10; ++c) {
+                    if (__system_property_get("net.ppp0.local-ip", ppp_local_ip)) {
+                        LOGI("Got net.ppp0.local-ip: %s\n", ppp_local_ip);
+                        break;
+                    }
+                    usleep(1000000);
+                }
+                if (c >= 10) {
+                    LOGE("Timeout waiting net.ppp0.local-ip - giving up!\n");
+                    goto error;
+                }
+                __system_property_get("net.dns1", ppp_dns1);
+                __system_property_get("net.dns2", ppp_dns2);
+                __system_property_get("net.ppp0.gw", ppp_gw);
+                sprintf(ppp_dnses, "%s %s", ppp_dns1, ppp_dns2);
+
+                responses[i].addresses = ppp_local_ip;
+                responses[i].dnses = ppp_dnses;
+                responses[i].gateways = ppp_gw;
             }
         }
     }
@@ -466,11 +490,11 @@ static void requestOrSendDataCallList(RIL_Token *t)
 
     if (t != NULL)
         RIL_onRequestComplete(*t, RIL_E_SUCCESS, responses,
-                              n * sizeof(RIL_Data_Call_Response_v6));
+                              1 * sizeof(RIL_Data_Call_Response_v6));
     else
         RIL_onUnsolicitedResponse(RIL_UNSOL_DATA_CALL_LIST_CHANGED,
                                   responses,
-                                  n * sizeof(RIL_Data_Call_Response_v6));
+                                  1 * sizeof(RIL_Data_Call_Response_v6));
 
     return;
 
@@ -1032,6 +1056,7 @@ static void requestSetupDataCall(void *data, size_t datalen, RIL_Token t)
     char status[32] = {0};
     int retry = 10;
     const char *pdp_type;
+    char pppdcmd[512] = "/system/bin/pppd ";
 
     LOGD("requesting data connection to APN '%s'", apn);
 
@@ -1110,14 +1135,20 @@ static void requestSetupDataCall(void *data, size_t datalen, RIL_Token t)
         err = at_send_command("AT+CGEREP=1,0", NULL);
 
         // Hangup anything that's happening there now
-        err = at_send_command("AT+CGACT=1,0", NULL);
+        err = at_send_command("AT+CGACT=0,1", NULL);
 
         // Start data on PDP context 1
         err = at_send_command("ATD*99***1#", &p_response);
 
         if (err < 0 || p_response->success == 0) {
-            goto error;
+            LOGE("start data failed: %d", err);
         }
+
+        if (!__system_property_get("rild.ppp.tty", pppdcmd + strlen(pppdcmd))) {
+            strcat(pppdcmd, "/dev/ttyUSB0");
+        }
+        strcat(pppdcmd, " call gprs");
+        system(pppdcmd);
     }
 
     requestOrSendDataCallList(&t);
@@ -1900,9 +1931,6 @@ static void initializeCallback(void *param)
     /*  Alternating voice/data off */
     at_send_command("AT+CMOD=0", NULL);
 
-    /*  Not muted */
-    at_send_command("AT+CMUT=0", NULL);
-
     /*  +CSSU unsolicited supp service notifications */
     at_send_command("AT+CSSN=0,1", NULL);
 
@@ -2102,7 +2130,7 @@ mainLoop(void *param)
                                             SOCK_STREAM );
             } else if (s_device_path != NULL) {
                 fd = open (s_device_path, O_RDWR);
-                if ( fd >= 0 && !memcmp( s_device_path, "/dev/ttyS", 9 ) ) {
+                if (fd >= 0) {
                     /* disable echo on serial ports */
                     struct termios  ios;
                     tcgetattr( fd, &ios );
