@@ -29,6 +29,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <cutils/properties.h>
 
 #include <poll.h>
 
@@ -52,6 +53,8 @@
 struct atcontext {
     pthread_t tid_reader;
     int fd;                  /* fd of the AT channel. */
+    int fd_tmp;                  /* fd of the AT channel. */
+    int fd_save;                  /* fd of the AT channel. */
     int readerCmdFds[2];
     int isInitialized;
     ATUnsolHandler unsolHandler;
@@ -609,6 +612,8 @@ static void onReaderClosed(void)
     }
 }
 
+static char OK[] ="OK";
+static int at_port = 0;
 static void *readerLoop(void *arg)
 {
     struct atcontext *ac = NULL;
@@ -623,8 +628,14 @@ static void *readerLoop(void *arg)
 
         line = readline();
 
-        if (line == NULL)
-            break;
+        if(at_port){
+            pthread_cond_wait(&ac->commandcond, &ac->commandmutex);
+        }
+
+        if (line == NULL){
+            line = OK;
+        }
+//            break;
 
         if(isSMSUnsolicited(line)) {
             char *line1;
@@ -830,6 +841,13 @@ int at_open(int fd, ATUnsolHandler h)
 
     ac = getAtContext();
 
+    ret = open("/dev/tty50",O_RDWR);
+    if(ret > 0)
+        ac->fd_tmp = ret;
+    else
+        ac->fd_tmp = -1;
+    ac->fd_save = fd;
+
     ac->fd = fd;
     ac->isInitialized = 1;
     ac->unsolHandler = h;
@@ -856,16 +874,58 @@ error:
     return -1;
 }
 
+void at_change(int at)
+{
+    struct atcontext *ac = getAtContext();
+
+    at_port = at;
+    pthread_mutex_lock(&ac->commandmutex);
+    if(at){
+//        if(ac->fd_tmp<0)
+//            ac->fd_tmp = open("/dev/ttyO4",O_RDWR);
+//        if(ac->fd_tmp > 0)
+//            ac->fd = ac->fd_tmp;
+    }
+    else{
+//        ac->fd = ac->fd_save;
+//        if (ac->fd_tmp >= 0) {
+//            if (close(ac->fd_tmp) != 0)
+//                LOGE("%s() FAILED to close fd %d!", __func__, ac->fd_tmp);
+//        }
+    /* Kick readerloop. */
+//        write(ac->readerCmdFds[1], "x", 1);
+        pthread_cond_signal(&ac->commandcond);
+    }
+    pthread_mutex_unlock(&ac->commandmutex);
+}
+
+int at_change_get(void)
+{
+    return at_port;
+}
+
 /* FIXME is it ok to call this from the reader and the command thread? */
 void at_close(void)
 {
     struct atcontext *ac = getAtContext();
+
+    if (ac->fd_tmp >= 0) {
+        if (close(ac->fd_tmp) != 0)
+            LOGE("%s() FAILED to close fd %d!", __func__, ac->fd_tmp);
+    }
+    ac->fd_tmp = -1;
 
     if (ac->fd >= 0) {
         if (close(ac->fd) != 0)
             LOGE("%s() FAILED to close fd %d!", __func__, ac->fd);
     }
     ac->fd = -1;
+
+    if (ac->fd_save >= 0) {
+        if (close(ac->fd_save) != 0)
+            LOGE("%s() FAILED to close fd %d!", __func__, ac->fd_save);
+    }
+    ac->fd_save = -1;
 
     pthread_mutex_lock(&ac->commandmutex);
 

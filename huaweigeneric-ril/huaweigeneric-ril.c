@@ -94,7 +94,7 @@ Maybe it's better to first type AT^U2DIAG=0 and then AT^U2DIAG=5 ...
 Regards, Phil.
 */
 
-#define LOG_NDEBUG 0
+#define LOG_NDEBUG 1
 #define LOG_TAG "RIL"
 #include <utils/Log.h>
 
@@ -380,7 +380,8 @@ static int isRadioOn()
     char *line;
     char ret1,ret2;
 
-    err = at_send_command_singleline("AT^RFSWITCH?", "^RFSWITCH:", &atResponse);
+//    err = at_send_command_singleline("AT^RFSWITCH?", "^RFSWITCH:", &atResponse);
+    err = at_send_command_singleline("AT+CFUN?", "+CFUN:", &atResponse);
 
     if (err != AT_NOERROR) {
         // assume radio is off
@@ -905,8 +906,8 @@ static void requestScreenState(void *data, size_t datalen, RIL_Token t)
         if (err != AT_NOERROR) goto error;
 
         /* Enable unsolicited reports */
-        err = at_send_command("AT^CURC=1");
-        if (err != AT_NOERROR) goto error;
+//        err = at_send_command("AT^CURC=1");
+//        if (err != AT_NOERROR) goto error;
 
         /* Enable GPRS reporting */
         err = at_send_command("AT+CGEREP=1,0");
@@ -921,8 +922,8 @@ static void requestScreenState(void *data, size_t datalen, RIL_Token t)
         if (err != AT_NOERROR) goto error;
         err = at_send_command("AT+CGREG=0");
         if (err != AT_NOERROR) goto error;
-        err = at_send_command("AT^CURC=0");
-        if (err != AT_NOERROR) goto error;
+//        err = at_send_command("AT^CURC=0");
+//        if (err != AT_NOERROR) goto error;
         err = at_send_command("AT+CGEREP=0,0");
         if (err != AT_NOERROR) goto error;
 
@@ -990,6 +991,20 @@ static int killConn(const char * cid)
     }
 #endif
 
+    property_set("ctl.stop", "pppd_gprs");
+    if (wait_for_property("init.svc.pppd_gprs", "stopped", 10) < 0) {
+        goto error;
+    }
+    property_set("ctl.start", "gsm_reset");
+    if (wait_for_property("init.svc.gsm_reset", "running", 10) < 0) {
+        LOGE("Timeout waiting init.svc.gsm_reset - giving up!\n");
+    }
+    sleep(1);
+    at_change(0);
+    sleep(1);
+    at_send_command("ATE0");
+    at_send_command("ATH");
+
     D("killall pppd finished");
 
     err = at_send_command("AT+CGACT=0,%s", cid);
@@ -1044,13 +1059,13 @@ static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
     D("requesting data connection to APN '%s'\n", apn);
 
     // Make sure there is no existing connection or pppd instance running
-    if (killConn("1") < 0) {
-        LOGE("killConn Error!\n");
-        goto error;
-    }
+//    if (killConn("1") < 0) {
+//        LOGE("killConn Error!\n");
+//        goto error;
+//    }
 
     /* Switch radio ON */
-    err = at_send_command("AT^RFSWITCH=1");
+//    err = at_send_command("AT^RFSWITCH=1");
     err = at_send_command("AT+CFUN=1");
 
     /* Define the PDP context */
@@ -1069,7 +1084,14 @@ static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
     err = at_send_command("AT+CGACT=0,1");
 
     /* Start data on PDP context 1 */
-    err = at_send_command("ATD*99***1#");
+//    err = at_send_command("ATD*99***1#");
+    err = at_send_command("ATE1");
+    ATResponse *atResponse = NULL;
+    err = at_send_command_singleline("AT+CSQ", "+CSQ:", &atResponse);
+    at_response_free(atResponse);
+    atResponse = NULL;
+    sleep(1);
+    at_change(1);
 //  if (err != AT_NOERROR) {
 //      goto error;
 //  }
@@ -1079,14 +1101,20 @@ static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
 //  sprintf(userpass, "%s * %s", user, pass);
 
     /* start the gprs pppd */
-#if 1
-    property_get("rild.ppp.tty", pppdcmd + strlen(pppdcmd), "/dev/ttyUSB0");
-    strcat(pppdcmd, " call gprs");
-    system(pppdcmd);
+#if 0
+//    property_get("rild.ppp.tty", pppdcmd + strlen(pppdcmd), "/dev/ttyO3");
+    strcat(pppdcmd, "call gprs");
+//    err = system("/system/bin/pppd /tmp/xzstest");
+//    LOGE("xzs pppdcmd : %s %d\n",pppdcmd,err);
+//    err = system(pppdcmd);
+    err = system("/system/bin/pppd /dev/ttyO2");
+    if(err != 0){
+    LOGE("xzs %d %s\n",err, strerror(errno));
+    }
 #else
     // Requires root access...
-    property_set("ctl.start", "ppp");
-    if (wait_for_property("init.svc.ppp", "running", 10) < 0) {
+    property_set("ctl.start", "pppd_gprs");
+    if (wait_for_property("init.svc.pppd_gprs", "running", 10) < 0) {
         LOGE("Timeout waiting init.svc.ppp - giving up!\n");
         goto error;
     }
@@ -1100,8 +1128,8 @@ static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
     }
 
     property_get("net.ppp0.local-ip", ppp_local_ip, NULL);
-    property_get("net.dns1", ppp_dns1, NULL);
-    property_get("net.dns2", ppp_dns2, NULL);
+    property_get("net.ppp0.dns1", ppp_dns1, NULL);
+    property_get("net.ppp0.dns2", ppp_dns2, NULL);
     property_get("net.ppp0.gw", ppp_gw, NULL);
     sprintf(ppp_dnses, "%s %s", ppp_dns1, ppp_dns2);
 
@@ -2215,6 +2243,10 @@ static UICC_Type getUICCType(void)
         return UICC_TYPE_UNKNOWN;
     }
 
+    UiccType = UICC_TYPE_SIM;
+    LOGI("Detected card type :%d", UiccType);
+    return UiccType;
+
     /* Only if card type is not known yet ... */
     if (UiccType == UICC_TYPE_UNKNOWN) {
 
@@ -2392,6 +2424,64 @@ error:
     goto finally;
 }
 
+static void  requestSIM_IO(void *data, size_t datalen, RIL_Token t)
+{
+    ATResponse *p_response = NULL;
+    RIL_SIM_IO_Response sr;
+    int err;
+    char *cmd = NULL;
+    RIL_SIM_IO_v6 *p_args;
+    char *line;
+
+    memset(&sr, 0, sizeof(sr));
+
+    p_args = (RIL_SIM_IO_v6 *)data;
+
+    /* FIXME handle pin2 */
+
+    if (p_args->data == NULL) {
+        asprintf(&cmd, "AT+CRSM=%d,%d,%d,%d,%d",
+                    p_args->command, p_args->fileid,
+                    p_args->p1, p_args->p2, p_args->p3);
+    } else {
+        asprintf(&cmd, "AT+CRSM=%d,%d,%d,%d,%d,%s",
+                    p_args->command, p_args->fileid,
+                    p_args->p1, p_args->p2, p_args->p3, p_args->data);
+    }
+
+    err = at_send_command_singleline(cmd, "+CRSM:", &p_response);
+
+    if (err < 0 || p_response->success == 0) {
+        goto error;
+    }
+
+    line = p_response->p_intermediates->line;
+
+    err = at_tok_start(&line);
+    if (err < 0) goto error;
+
+    err = at_tok_nextint(&line, &(sr.sw1));
+    if (err < 0) goto error;
+
+    err = at_tok_nextint(&line, &(sr.sw2));
+    if (err < 0) goto error;
+
+    if (at_tok_hasmore(&line)) {
+        err = at_tok_nextstr(&line, &(sr.simResponse));
+        if (err < 0) goto error;
+    }
+
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, &sr, sizeof(sr));
+    at_response_free(p_response);
+    free(cmd);
+
+    return;
+error:
+    RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
+    at_response_free(p_response);
+    free(cmd);
+
+}
 /**
  * RIL_REQUEST_SIM_IO
  *
@@ -2400,7 +2490,7 @@ error:
  * where it assumes all of the EF selection will be done by the
  * callee.
  */
-static void requestSIM_IO(void *data, size_t datalen, RIL_Token t)
+static void xxxrequestSIM_IO(void *data, size_t datalen, RIL_Token t)
 {
     (void) datalen;
     ATResponse *atResponse = NULL;
@@ -3535,6 +3625,7 @@ static void requestSetPreferredNetworkType(void *data, size_t datalen, RIL_Token
 
     */
 
+    goto gm323;
     switch (rat) {
         case PREF_NET_TYPE_GSM_ONLY:  /* GSM only */
             cmd = "AT^SYSCFG=13,1,3FFFFFFF,2,4"; /* for GPRS/EDGE Only */
@@ -3553,7 +3644,7 @@ static void requestSetPreferredNetworkType(void *data, size_t datalen, RIL_Token
     if (err != AT_NOERROR)
         goto error;
 
-
+gm323:
     /* Trigger autoregister */
     err = at_send_command("AT+COPS=0");
     if (err != AT_NOERROR)
@@ -3587,7 +3678,11 @@ static void requestGetPreferredNetworkType(RIL_Token t)
     int err;
     char *line;
     int ret1,ret2;
-    int response = PREF_NET_TYPE_GSM_WCDMA_AUTO;
+    int response = PREF_NET_TYPE_GSM_ONLY;
+
+    D("requestGetPreferredNetworkType() mode:%d\n",response);
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, &response, sizeof(int));
+    return;
 
     err = at_send_command_singleline("AT^SYSCFG?", "^SYSCFG:", &atResponse);
 
@@ -4186,6 +4281,10 @@ static void requestSignalStrength(RIL_Token t)
     int ber;
     int rssi;
 
+        char value[PROPERTY_VALUE_MAX];
+        if (property_get("sys.shutdown.requested", value, NULL))
+            return;
+
     memset(&signalStrength, 0, sizeof(RIL_SignalStrength_v6));
 
     signalStrength.LTE_SignalStrength.signalStrength = 0x7FFFFFFF;
@@ -4194,25 +4293,33 @@ static void requestSignalStrength(RIL_Token t)
     signalStrength.LTE_SignalStrength.rssnr = 0x7FFFFFFF;
     signalStrength.LTE_SignalStrength.cqi = 0x7FFFFFFF;
 
-    err = at_send_command_singleline("AT+CSQ", "+CSQ:", &atResponse);
-    if (err != AT_NOERROR)
-        goto error;
+    if(at_change_get()){
+        rssi = 31;
+        ber = 99;
+        signalStrength.GW_SignalStrength.signalStrength = rssi;
+        signalStrength.GW_SignalStrength.bitErrorRate = ber;
+    }
+    else{
+        err = at_send_command_singleline("AT+CSQ", "+CSQ:", &atResponse);
+        if (err != AT_NOERROR)
+            goto error;
 
-    line = atResponse->p_intermediates->line;
+        line = atResponse->p_intermediates->line;
 
-    err = at_tok_start(&line);
-    if (err < 0) goto error;
+        err = at_tok_start(&line);
+        if (err < 0) goto error;
 
-    err = at_tok_nextint(&line,&rssi);
-    if (err < 0) goto error;
+        err = at_tok_nextint(&line,&rssi);
+        if (err < 0) goto error;
 
-    signalStrength.GW_SignalStrength.signalStrength = rssi;
+        signalStrength.GW_SignalStrength.signalStrength = rssi;
 
-    err = at_tok_nextint(&line, &ber);
-    if (err < 0)
-        goto error;
+        err = at_tok_nextint(&line, &ber);
+        if (err < 0)
+            goto error;
 
-    signalStrength.GW_SignalStrength.bitErrorRate = ber;
+        signalStrength.GW_SignalStrength.bitErrorRate = ber;
+    }
 
     signalStrength.CDMA_SignalStrength.dbm = 0;
     signalStrength.CDMA_SignalStrength.ecio = 0;
@@ -4261,7 +4368,7 @@ static void requestOperator(RIL_Token t)
     memset(response, 0, sizeof(response));
 
     err = at_send_command_multiline
-        ("AT+COPS=3,0;+COPS?;+COPS=3,1;+COPS?;+COPS=3,2;+COPS?", "+COPS:",
+        ("AT+COPS=3,0;+COPS?;+COPS=3,0;+COPS?;+COPS=3,2;+COPS?", "+COPS:",
          &atResponse);
 
     if (err != AT_NOERROR)
@@ -4362,7 +4469,7 @@ static void requestRadioPower(void *data, size_t datalen, RIL_Token t)
         char value[PROPERTY_VALUE_MAX];
 
         /* Switch RF OFF */
-        err = at_send_command("AT^RFSWITCH=0");
+        err = at_send_command("AT+CFUN=0");
         if (err != AT_NOERROR)
             goto error;
 
@@ -4374,7 +4481,7 @@ static void requestRadioPower(void *data, size_t datalen, RIL_Token t)
     } else if (onOff > 0 && getRadioState() == RADIO_STATE_OFF) {
 
         /* Switch RF ON */
-        err = at_send_command("AT^RFSWITCH=1");
+        err = at_send_command("AT+CFUN=1");
         if (err != AT_NOERROR)
             goto error;
 
@@ -5189,7 +5296,7 @@ static void requestResetRadio(RIL_Token t)
         goto error;
 
     /* Go online */
-    err = at_send_command("AT^RFSWITCH=1");
+//    err = at_send_command("AT^RFSWITCH=1");
     err = at_send_command("AT+CFUN=1");
     if (err != AT_NOERROR)
         goto error;
@@ -5433,8 +5540,25 @@ error:
 static pthread_t s_tid_queueRunner;
 
 
-/** Do post- SIM ready initialization. */
 static void onSIMReady(void *p)
+{
+    at_send_command_singleline("AT+CSMS=1", "+CSMS:", NULL);
+    /*
+     * Always send SMS messages directly to the TE
+     *
+     * mode = 1 // discard when link is reserved (link should never be
+     *             reserved)
+     * mt = 2   // most messages routed to TE
+     * bm = 2   // new cell BM's routed to TE
+     * ds = 1   // Status reports routed to TE
+     * bfr = 1  // flush buffer
+     */
+    at_send_command("AT+CNMI=1,2,2,1,0", NULL);
+    LOGI ("######### SIM READY !!\n");
+}
+
+/** Do post- SIM ready initialization. */
+static void xzsonSIMReady(void *p)
 {
     int err = 0;
     (void) p;
@@ -5455,7 +5579,7 @@ static void onSIMReady(void *p)
      * ds = 1   // Status reports routed to TE
      * bfr = 1  // flush buffer
      */
-    at_send_command("AT+CNMI=1,2,2,1,1");
+    at_send_command("AT+CNMI=1,2,2,1,0");
 
     /* Select cell broadcast messages: Do not accept messages */
     at_send_command("AT+CSCB=1");
@@ -5482,7 +5606,7 @@ static void onSIMReady(void *p)
     at_send_command("AT+CMGF=0");
 
     /* Enable unsolicited RSSI reporting */
-    at_send_command("AT^CURC=1");
+//    at_send_command("AT^CURC=1");
 
     /* Enable GPRS reporting */
     at_send_command("AT+CGEREP=1,0");
@@ -5567,8 +5691,9 @@ static void processRequest (int request, void *data, size_t datalen, RIL_Token t
 
     switch (request) {
         case RIL_REQUEST_GET_CURRENT_CALLS:
-            if (radio_state == RADIO_STATE_SIM_LOCKED_OR_ABSENT)
+            if (radio_state == RADIO_STATE_SIM_LOCKED_OR_ABSENT){
                 RIL_onRequestComplete(t, RIL_E_RADIO_NOT_AVAILABLE, NULL, 0);
+            }
             else
                 requestGetCurrentCalls(data, datalen, t);
             break;
@@ -5976,7 +6101,7 @@ static void sendTime(void *p)
     /* convert timezone hours to timezone quarters of hours */
     tzi = (num[0] * 10 + num[1]) * 4 + (num[2] * 10 + num[3]) / 15;
     strftime(str, 20, "%y/%m/%d,%T", &tm);
-    at_send_command("AT+CCLK=\"%s%c%02d\"", str, tz[0], tzi);
+    at_send_command("AT+CCLK=\"%s\"", str);
 }
 
 
@@ -5987,20 +6112,13 @@ static char initializeCommon(void)
     static const char* const initcmd[] = {
 
         /* Reset the MS*/
-        "AT+CFUN=6",
-
-        /*  atchannel is tolerant of echo but it must */
-        /*  reset and have verbose result codes */
-        "ATZV1",
+        "AT+CFUN=1",
 
         /*  echo off */
         "ATE0",
 
         /*  No auto-answer */
         "ATS0=0",
-
-        /*  No auto-answer */
-        "AT%AUTOANSWER=0",
 
         /*  send results */
         "ATQ0",
@@ -6050,7 +6168,7 @@ static char initializeCommon(void)
         /*  Modem mode */
         "AT+FCLASS=0",
 
-        "AT+CNMI=1,2,2,2,0",
+        "AT+CNMI=1,2,2,1,0",
         //"AT+CPPP=1",
 
 
@@ -6094,7 +6212,7 @@ static char initializeChannel(void)
         "AT+CMOD=0",
 
         /*  Not muted */
-        "AT+CMUT=0",
+//        "AT+CMUT=0",
 
         /*  Network registration events */
         "AT+CREG=2",
@@ -6105,16 +6223,16 @@ static char initializeChannel(void)
         "AT+CGEQREQ=1,4,0,0,0,0,2,0,\"0E0\",\"0E0\",3,0,0",
 
         /* Enable unsolicited reports */
-        "AT^CURC=1",
+//        "AT^CURC=1",
 
         /* Enable GPRS reporting */
         "AT+CGEREP=1,0",
 
         /* for 3G Preferred */
-        "AT^SYSCFG=2,2,3FFFFFFF,1,2",
+//        "AT^SYSCFG=2,2,3FFFFFFF,1,2",
 
         /* Disable RF */
-        "AT^RFSWITCH=0"
+//        "AT^RFSWITCH=0"
     };
 
     D("%s()", __func__);
@@ -6298,13 +6416,15 @@ static void *queueRunner(void *param)
                     fd = socket_loopback_client(queueArgs->port, SOCK_STREAM);
             } else if (queueArgs->device_path != NULL) {
 
-                fd = open (queueArgs->device_path, O_RDWR);
-                if ( fd >= 0 && !memcmp( queueArgs->device_path, "/dev/ttyUSB", 11 ) ) {
+                fd = open (queueArgs->device_path, O_RDWR | O_NONBLOCK);
+                if ( fd >= 0 && !memcmp( queueArgs->device_path, "/dev/ttyO3", 10 ) ) {
 
                     /* disable echo on serial ports */
                     struct termios  ios;
                     tcgetattr( fd, &ios );
                     ios.c_lflag = 0;  /* disable ECHO, ICANON, etc... */
+                    cfsetispeed(&ios, B115200);        //真真真真9600
+                    cfsetospeed(&ios, B115200);        //真真真真9600
                     tcsetattr( fd, TCSANOW, &ios );
                 }
             }
