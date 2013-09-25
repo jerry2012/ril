@@ -33,6 +33,8 @@
 #include <cutils/sockets.h>
 #include <termios.h>
 #include <sys/system_properties.h>
+#include <cutils/properties.h>
+#include <telephony/ril.h>
 
 #include "ril.h"
 #include "hardware/qemu_pipe.h"
@@ -43,7 +45,7 @@
 #define MAX_AT_RESPONSE 0x1000
 
 /* pathname returned from RIL_REQUEST_SETUP_DATA_CALL / RIL_REQUEST_SETUP_DEFAULT_PDP */
-#define PPP_TTY_PATH "/dev/ppp0"
+#define PPP_TTY_PATH "ppp0"
 
 #ifdef USE_TI_COMMANDS
 
@@ -78,6 +80,7 @@ static SIM_Status getSIMStatus();
 static int getCardStatus(RIL_CardStatus_v6 **pp_card_status);
 static void freeCardStatus(RIL_CardStatus_v6 *p_card_status);
 static void onDataCallListChanged(void *param);
+static int killConn(const char * cid);
 
 extern const char * requestToString(int request);
 
@@ -91,6 +94,10 @@ static const RIL_RadioFunctions s_callbacks = {
     getVersion
 };
 
+struct operatorPollParams {
+    RIL_Token t;
+    int loopcount;
+};
 #ifdef RIL_SHLIB
 static const struct RIL_Env *s_rilenv;
 
@@ -259,8 +266,8 @@ static void requestRadioPower(void *data, size_t datalen, RIL_Token t)
     onOff = ((int *)data)[0];
 
     if (onOff == 0 && sState != RADIO_STATE_OFF) {
-        err = at_send_command("AT+CFUN=0", &p_response);
-       if (err < 0 || p_response->success == 0) goto error;
+//        err = at_send_command("AT+CFUN=0", &p_response);
+//       if (err < 0 || p_response->success == 0) goto error;
         setRadioState(RADIO_STATE_OFF);
     } else if (onOff > 0 && sState == RADIO_STATE_OFF) {
         err = at_send_command("AT+CFUN=1", &p_response);
@@ -750,42 +757,80 @@ static void requestHangup(void *data, size_t datalen, RIL_Token t)
     RIL_onRequestComplete(t, RIL_E_SUCCESS, NULL, 0);
 }
 
-static void requestSignalStrength(void *data, size_t datalen, RIL_Token t)
+static void requestSignalStrength(RIL_Token t)
 {
-    RIL_SignalStrength_v6 response;
-    ATResponse *p_response = NULL;
+    RIL_SignalStrength_v6 signalStrength;
+    ATResponse *atResponse = NULL;
     int err;
     char *line;
+    int ber;
+    int rssi;
 
-    err = at_send_command_singleline("AT+CSQ", "+CSQ:", &p_response);
+        char value[PROPERTY_VALUE_MAX];
+        if (property_get("sys.shutdown.requested", value, NULL))
+            return;
 
-    if (err < 0 || p_response->success == 0) {
-        RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
-        goto error;
+    memset(&signalStrength, 0, sizeof(RIL_SignalStrength_v6));
+
+    signalStrength.LTE_SignalStrength.signalStrength = 0x7FFFFFFF;
+    signalStrength.LTE_SignalStrength.rsrp = 0x7FFFFFFF;
+    signalStrength.LTE_SignalStrength.rsrq = 0x7FFFFFFF;
+    signalStrength.LTE_SignalStrength.rssnr = 0x7FFFFFFF;
+    signalStrength.LTE_SignalStrength.cqi = 0x7FFFFFFF;
+
+    if(at_change_get()){
+        rssi = 31;
+        ber = 99;
+        signalStrength.GW_SignalStrength.signalStrength = rssi;
+        signalStrength.GW_SignalStrength.bitErrorRate = ber;
+    }
+    else{
+        err = at_send_command_singleline("AT+CSQ", "+CSQ:", &atResponse);
+        if (err < 0)
+            goto error;
+
+        line = atResponse->p_intermediates->line;
+
+        err = at_tok_start(&line);
+        if (err < 0) goto error;
+
+        err = at_tok_nextint(&line,&rssi);
+        if (err < 0) goto error;
+
+        signalStrength.GW_SignalStrength.signalStrength = rssi;
+
+        err = at_tok_nextint(&line, &ber);
+        if (err < 0)
+            goto error;
+
+        signalStrength.GW_SignalStrength.bitErrorRate = ber;
     }
 
-    line = p_response->p_intermediates->line;
+    signalStrength.CDMA_SignalStrength.dbm = 0;
+    signalStrength.CDMA_SignalStrength.ecio = 0;
+    signalStrength.EVDO_SignalStrength.dbm = 0;
+    signalStrength.EVDO_SignalStrength.ecio = 0;
+    signalStrength.EVDO_SignalStrength.signalNoiseRatio = 0;
+    signalStrength.LTE_SignalStrength.signalStrength = 0;
+    signalStrength.LTE_SignalStrength.rsrp = 0;
+    signalStrength.LTE_SignalStrength.rsrq = 0;
+    signalStrength.LTE_SignalStrength.rssnr = 0;
+    signalStrength.LTE_SignalStrength.cqi = 0;
 
-    err = at_tok_start(&line);
-    if (err < 0) goto error;
+    LOGI("SignalStrength %d BER: %d", rssi, ber);
 
-    memset(&response, 0, sizeof(RIL_SignalStrength_v6));
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, &signalStrength,
+                          sizeof(RIL_SignalStrength_v6));
 
-    err = at_tok_nextint(&line, &response.GW_SignalStrength.signalStrength);
-    if (err < 0) goto error;
-
-    err = at_tok_nextint(&line, &response.GW_SignalStrength.bitErrorRate);
-    if (err < 0) goto error;
-
-    RIL_onRequestComplete(t, RIL_E_SUCCESS, &response, sizeof(response));
-
-    at_response_free(p_response);
+    at_response_free(atResponse);
+    atResponse = NULL;
     return;
 
 error:
-    LOGE("requestSignalStrength must never return an error when radio is on");
+    LOGE("%s() Must never return an error when radio is on", __func__);
     RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
-    at_response_free(p_response);
+    at_response_free(atResponse);
+    return;
 }
 
 static void requestRegistrationState(int request, void *data,
@@ -936,7 +981,7 @@ static void requestOperator(void *data, size_t datalen, RIL_Token t)
     ATResponse *p_response = NULL;
 
     err = at_send_command_multiline(
-        "AT+COPS=3,0;+COPS?;+COPS=3,1;+COPS?;+COPS=3,2;+COPS?",
+        "AT+COPS=3,0;+COPS?;+COPS=3,0;+COPS?;+COPS=3,2;+COPS?",
         "+COPS:", &p_response);
 
     /* we expect 3 lines here:
@@ -1034,133 +1079,152 @@ error:
     at_response_free(p_response);
 }
 
-static void requestSetupDataCall(void *data, size_t datalen, RIL_Token t)
+/* wait for a propertyvalue change */
+static int wait_for_property(const char *name, const char *desired_value, int maxwait)
 {
-    const char *apn;
-    char *cmd;
-    int err;
-    ATResponse *p_response = NULL;
+    char value[PROPERTY_VALUE_MAX] = {'\0'};
+    int maxnaps = maxwait / 1;
 
-    apn = ((const char **)data)[2];
-
-#ifdef USE_TI_COMMANDS
-    // Config for multislot class 10 (probably default anyway eh?)
-    err = at_send_command("AT%CPRIM=\"GMM\",\"CONFIG MULTISLOT_CLASS=<10>\"",
-                        NULL);
-
-    err = at_send_command("AT%DATA=2,\"UART\",1,,\"SER\",\"UART\",0", NULL);
-#endif /* USE_TI_COMMANDS */
-
-    int fd, qmistatus;
-    size_t cur = 0;
-    size_t len;
-    ssize_t written, rlen;
-    char status[32] = {0};
-    int retry = 10;
-    const char *pdp_type;
-    char pppdcmd[512] = "/system/bin/pppd ";
-
-    LOGD("requesting data connection to APN '%s'", apn);
-
-    fd = open ("/dev/qmi", O_RDWR);
-    if (fd >= 0) { /* the device doesn't exist on the emulator */
-
-        LOGD("opened the qmi device\n");
-        asprintf(&cmd, "up:%s", apn);
-        len = strlen(cmd);
-
-        while (cur < len) {
-            do {
-                written = write (fd, cmd + cur, len - cur);
-            } while (written < 0 && errno == EINTR);
-
-            if (written < 0) {
-                LOGE("### ERROR writing to /dev/qmi");
-                close(fd);
-                goto error;
-            }
-
-            cur += written;
-        }
-
-        // wait for interface to come online
-
-        do {
-            sleep(1);
-            do {
-                rlen = read(fd, status, 31);
-            } while (rlen < 0 && errno == EINTR);
-
-            if (rlen < 0) {
-                LOGE("### ERROR reading from /dev/qmi");
-                close(fd);
-                goto error;
-            } else {
-                status[rlen] = '\0';
-                LOGD("### status: %s", status);
-            }
-        } while (strncmp(status, "STATE=up", 8) && strcmp(status, "online") && --retry);
-
-        close(fd);
-
-        if (retry == 0) {
-            LOGE("### Failed to get data connection up\n");
-            goto error;
-        }
-
-        qmistatus = system("netcfg rmnet0 dhcp");
-
-        LOGD("netcfg rmnet0 dhcp: status %d\n", qmistatus);
-
-        if (qmistatus < 0) goto error;
-
-    } else {
-
-        if (datalen > 6 * sizeof(char *)) {
-            pdp_type = ((const char **)data)[6];
-        } else {
-            pdp_type = "IP";
-        }
-
-        asprintf(&cmd, "AT+CGDCONT=1,\"%s\",\"%s\",,0,0", pdp_type, apn);
-        //FIXME check for error here
-        err = at_send_command(cmd, NULL);
-        free(cmd);
-
-        // Set required QoS params to default
-        err = at_send_command("AT+CGQREQ=1", NULL);
-
-        // Set minimum QoS params to default
-        err = at_send_command("AT+CGQMIN=1", NULL);
-
-        // packet-domain event reporting
-        err = at_send_command("AT+CGEREP=1,0", NULL);
-
-        // Hangup anything that's happening there now
-        err = at_send_command("AT+CGACT=0,1", NULL);
-
-        // Start data on PDP context 1
-        err = at_send_command("ATD*99***1#", &p_response);
-
-        if (err < 0 || p_response->success == 0) {
-            LOGE("start data failed: %d", err);
-        }
-
-        if (!__system_property_get("rild.ppp.tty", pppdcmd + strlen(pppdcmd))) {
-            strcat(pppdcmd, "/dev/ttyUSB0");
-        }
-        strcat(pppdcmd, " call gprs");
-        system(pppdcmd);
+    if (maxnaps < 1) {
+        maxnaps = 1;
     }
 
-    requestOrSendDataCallList(&t);
+    while (maxnaps-- > 0) {
+        usleep(1000000);
+        if (property_get(name, value, NULL)) {
+            if (desired_value == NULL ||
+                    strcmp(value, desired_value) == 0) {
+                return 0;
+            }
+        }
+    }
+    return -1; /* failure */
+}
 
-    at_response_free(p_response);
+static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
+{
+    const char *apn;
+    const char *user = NULL;
+    const char *pass = NULL;
+    int err;
+    int fd, pppstatus,i;
+    FILE *pppconfig;
+    size_t cur = 0;
+    ssize_t written, rlen;
+    char status[32] = {0};
+    char *buffer;
+    long buffSize, len;
+    int retry = 10;
 
+    int n = 1;
+    RIL_Data_Call_Response_v6 responses;
+    char ppp_dnses[(PROPERTY_VALUE_MAX * 2) + 3] = {'\0'};
+    char ppp_local_ip[PROPERTY_VALUE_MAX] = {'\0'};
+    char ppp_dns1[PROPERTY_VALUE_MAX] = {'\0'};
+    char ppp_dns2[PROPERTY_VALUE_MAX] = {'\0'};
+    char ppp_gw[PROPERTY_VALUE_MAX] = {'\0'};
+
+    apn = ((const char **)data)[2];
+    user = ((char **)data)[3];
+    if (user == NULL || strlen(user) < 2) {
+        user = "dummy";
+    }
+
+    pass = ((char **)data)[4];
+    if (pass == NULL || strlen(pass) < 2) {
+        pass = "dummy";
+    }
+
+    LOGD("requesting data connection to APN '%s'\n", apn);
+
+    // Make sure there is no existing connection or pppd instance running
+//    if (killConn("1") < 0) {
+//        LOGE("killConn Error!\n");
+//        goto error;
+//    }
+
+    /* Switch radio ON */
+//    err = at_send_command("AT^RFSWITCH=1");
+    err = at_send_command("AT+CFUN=1",NULL);
+
+    /* Define the PDP context */
+    const char *pdp_type;
+    char *cmd;
+    pdp_type = "IP";
+    asprintf(&cmd, "AT+CGDCONT=1,\"%s\",\"%s\",,0,0", pdp_type, apn);
+    //FIXME check for error here
+    err = at_send_command(cmd, NULL);
+    free(cmd);
+
+    /* Set required QoS params to default */
+    err = at_send_command("AT+CGQREQ=1",NULL);
+
+    /* Set minimum QoS params to default */
+    err = at_send_command("AT+CGQMIN=1",NULL);
+
+    /* packet-domain event reporting */
+    err = at_send_command("AT+CGEREP=1,0",NULL);
+
+    /* Hangup anything that's happening there now */
+    err = at_send_command("AT+CGACT=0,1",NULL);
+
+    /* Start data on PDP context 1 */
+//    err = at_send_command("ATD*99***1#");
+    err = at_send_command("ATE1",NULL);
+//    ATResponse *atResponse = NULL;
+//    err = at_send_command_singleline("AT+CSQ", "+CSQ:", &atResponse);
+//    at_response_free(atResponse);
+//    atResponse = NULL;
+    sleep(1);
+    at_change(1);
+//  if (err != AT_NOERROR) {
+//      goto error;
+//  }
+    sleep(2); //Wait for the modem to finish
+
+    // set up the pap/chap secrets file
+//  sprintf(userpass, "%s * %s", user, pass);
+
+    /* start the gprs pppd */
+    // Requires root access...
+    property_set("ctl.start", "pppd_gprs");
+    if (wait_for_property("init.svc.pppd_gprs", "running", 20) < 0) {
+        LOGE("Timeout waiting init.svc.ppp - giving up!\n");
+        goto error;
+    }
+
+    sleep(10); // Allow time for ip-up to complete
+
+    if (wait_for_property("net.ppp0.local-ip", NULL, 10) < 0) {
+        LOGE("Timeout waiting net.ppp0.local-ip - giving up!\n");
+        killConn(NULL);
+        goto error;
+    }
+
+    property_get("net.ppp0.local-ip", ppp_local_ip, NULL);
+    property_get("net.ppp0.dns1", ppp_dns1, NULL);
+    property_get("net.ppp0.dns2", ppp_dns2, NULL);
+    property_get("net.ppp0.gw", ppp_gw, NULL);
+    sprintf(ppp_dnses, "%s %s", ppp_dns1, ppp_dns2);
+
+    LOGI("Got net.ppp0.local-ip: %s\n", ppp_local_ip);
+
+    responses.status = 0;
+    responses.suggestedRetryTime = -1;
+    responses.cid = 1;
+    responses.active = 2;
+    responses.type = (char*)"PPP";
+    responses.ifname = (char*)PPP_TTY_PATH;
+    responses.addresses = ppp_local_ip;
+    responses.dnses = ppp_dnses;
+    responses.gateways = ppp_gw;
+
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, &responses, sizeof(RIL_Data_Call_Response_v6));
     return;
+
 error:
+    LOGE("Unable to setup PDP\n");
     RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
-    at_response_free(p_response);
 
 }
 
@@ -1285,6 +1349,353 @@ static void  requestSendUSSD(void *data, size_t datalen, RIL_Token t)
 
 }
 
+static int killConn(const char * cid)
+{
+    int err;
+    int fd;
+    int i=0;
+
+    LOGD("killConn");
+
+#if 0
+    while ((fd = open("/sys/class/net/ppp0/ifindex",O_RDONLY)) > 0)
+    {
+        if(i%5 == 0)
+            system("killall pppd");
+        if(i>25)
+            goto error;
+        i++;
+        close(fd);
+        sleep(2);
+    }
+#elif 0
+    // Requires root access...
+    property_set("ctl.stop", "pppd_gprs");
+    if (wait_for_property("init.svc.pppd_gprs", "stopped", 10) < 0) {
+        goto error;
+    }
+#endif
+
+//    property_set("ctl.stop", "pppd_gprs");
+//    if (wait_for_property("init.svc.pppd_gprs", "stopped", 10) < 0) {
+//        goto error;
+//    }
+    property_set("ctl.start", "gsm_reset");
+    if (wait_for_property("init.svc.gsm_reset", "running", 10) < 0) {
+        LOGE("Timeout waiting init.svc.gsm_reset - giving up!\n");
+    }
+    sleep(10);
+    at_change(0);
+    sleep(1);
+    at_send_command("ATE0",NULL);
+//    at_send_command("ATH",NULL);
+
+    LOGD("killall pppd finished");
+
+//    err = at_send_command("AT+CGACT=0,%s", cid);
+//    err = at_send_command("AT+CGACT=0,1",NULL);
+//    if (err < 0)
+//        goto error;
+//
+//    at_send_command("ATH",NULL);
+    return 0;
+
+error:
+    return -1;
+}
+
+static void requestDeactivateDefaultPDP(void *data, size_t datalen, RIL_Token t)
+{
+    char * cid;
+
+    LOGD("requestDeactivateDefaultPDP()");
+
+    cid = ((char **)data)[0];
+    if (killConn(cid) < 0)
+        goto error;
+
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, NULL, 0);
+    return;
+
+error:
+    RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
+}
+
+/**
+ * RIL_REQUEST_QUERY_AVAILABLE_NETWORKS
+ *
+ * Scans for available networks.
+*/
+static void requestQueryAvailableNetworks(RIL_Token t)
+{
+    #define QUERY_NW_NUM_PARAMS 4
+
+    /*
+     * AT+COPS=?
+     *   +COPS: [list of supported (<stat>,long alphanumeric <oper>
+     *           ,short alphanumeric <oper>,numeric <oper>[,<AcT>])s]
+     *          [,,(list of supported <mode>s),(list of supported <format>s)]
+     *
+     *   <stat>
+     *     0 = unknown
+     *     1 = available
+     *     2 = current
+     *     3 = forbidden
+     */
+    int err = 0;
+    ATResponse *atResponse = NULL;
+    const char *statusTable[] =
+        { "unknown", "available", "current", "forbidden" };
+    char **responseArray = NULL;
+    char *p;
+    int n = 0;
+    int i = 0;
+
+    err = at_send_command_multiline("AT+COPS=?", "+COPS:", &atResponse);
+    if (err < 0 || atResponse->p_intermediates == NULL) {
+        LOGE("Failed to get operator responses: err:%d, intermediates: %p",err,atResponse->p_intermediates);
+        goto error;
+    }
+
+    p = atResponse->p_intermediates->line;
+    LOGD("Got line '%s'",p);
+
+    /* count number of '('. */
+    err = at_tok_charcounter(p, '(', &n);
+    if (err < 0) goto error;
+
+    /* We don't want to process the list of supported modes and the list of supported
+       commands, so just skip them */
+    if (n < 2) n = 0;
+    else n -= 2;
+
+    /* Allocate array of strings, blocks of 4 strings. */
+    responseArray = (char **)alloca(n * QUERY_NW_NUM_PARAMS * sizeof(char *));
+
+    /* Loop and collect response information into the response array. */
+    for (i = 0; i < n; i++) {
+        int status = 0;
+        char *line = NULL;
+        char *s = NULL;
+        char *longAlphaNumeric = NULL;
+        char *shortAlphaNumeric = NULL;
+        char *numeric = NULL;
+        char *remaining = NULL;
+
+        s = line = getFirstElementValue(p, "(", ")", &remaining);
+        p = remaining;
+
+        if (line == NULL) {
+            LOGE("%s() Null pointer while parsing COPS response."
+             "This should not happen.", __func__);
+            break;
+        }
+
+        LOGD("%d operator: '%s'",i,line);
+
+        /* <stat> */
+        err = at_tok_nextint(&line, &status);
+        if (err < 0) {
+error2:
+            free(s);
+            goto error;
+        }
+
+        /* long alphanumeric <oper> */
+        err = at_tok_nextstr(&line, &longAlphaNumeric);
+        if (err < 0)
+            goto error2;
+
+        /* short alphanumeric <oper> */
+        err = at_tok_nextstr(&line, &shortAlphaNumeric);
+        if (err < 0)
+            goto error2;
+
+        /* numeric <oper> */
+        err = at_tok_nextstr(&line, &numeric);
+        if (err < 0)
+            goto error2;
+
+        responseArray[i * QUERY_NW_NUM_PARAMS + 0] = (char*) alloca(strlen(longAlphaNumeric) + 1);
+        strcpy(responseArray[i * QUERY_NW_NUM_PARAMS + 0], longAlphaNumeric);
+
+        responseArray[i * QUERY_NW_NUM_PARAMS + 1] = (char*) alloca(strlen(shortAlphaNumeric) + 1);
+        strcpy(responseArray[i * QUERY_NW_NUM_PARAMS + 1], shortAlphaNumeric);
+
+        responseArray[i * QUERY_NW_NUM_PARAMS + 2] = (char*) alloca(strlen(numeric) + 1);
+        strcpy(responseArray[i * QUERY_NW_NUM_PARAMS + 2], numeric);
+
+        free(s);
+
+        /*
+         * Check if modem returned an empty string, and fill it with MNC/MMC
+         * if that's the case.
+         */
+        if (responseArray[i * QUERY_NW_NUM_PARAMS + 0] && strlen(responseArray[i * QUERY_NW_NUM_PARAMS + 0]) == 0) {
+            responseArray[i * QUERY_NW_NUM_PARAMS + 0] = (char*) alloca(strlen(responseArray[i * QUERY_NW_NUM_PARAMS + 2]) + 1);
+            strcpy(responseArray[i * QUERY_NW_NUM_PARAMS + 0], responseArray[i * QUERY_NW_NUM_PARAMS + 2]);
+        }
+
+        if (responseArray[i * QUERY_NW_NUM_PARAMS + 1] && strlen(responseArray[i * QUERY_NW_NUM_PARAMS + 1]) == 0) {
+            responseArray[i * QUERY_NW_NUM_PARAMS + 1] = (char*) alloca(strlen(responseArray[i * QUERY_NW_NUM_PARAMS + 2]) + 1);
+            strcpy(responseArray[i * QUERY_NW_NUM_PARAMS + 1], responseArray[i * QUERY_NW_NUM_PARAMS + 2]);
+        }
+
+        /* Add status */
+        responseArray[i * QUERY_NW_NUM_PARAMS + 3] = (char*) alloca(strlen(statusTable[status])+1);
+        strcpy(responseArray[i * QUERY_NW_NUM_PARAMS + 3],statusTable[status]);
+    }
+
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, responseArray,
+                          i * QUERY_NW_NUM_PARAMS * sizeof(char *));
+
+finally:
+    at_response_free(atResponse);
+    return;
+
+error:
+    RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
+    goto finally;
+}
+
+/**
+ * RIL_REQUEST_SET_NETWORK_SELECTION_MANUAL
+ *
+ * Manually select a specified network.
+ *
+ * The radio baseband/RIL implementation is expected to fall back to
+ * automatic selection mode if the manually selected network should go
+ * out of range in the future.
+ */
+void requestSetNetworkSelectionManual(void *data, size_t datalen,
+                                      RIL_Token t)
+{
+    /*
+     * AT+COPS=[<mode>[,<format>[,<oper>[,<AcT>]]]]
+     *    <mode>   = 4 = Manual (<oper> field shall be present and AcT optionally) with fallback to automatic if manual fails.
+     *    <format> = 2 = Numeric <oper>, the number has structure:
+     *                   (country code digit 3)(country code digit 2)(country code digit 1)
+     *                   (network code digit 2)(network code digit 1)
+     */
+
+    (void) datalen;
+    int err = 0;
+    const char *mccMnc = (const char *) data;
+
+    /* Check inparameter. */
+    if (mccMnc == NULL)
+        goto error;
+
+    /* Build and send command. */
+    char *cmd;
+    asprintf(&cmd, "AT+COPS=1,2,\"%s\"", mccMnc);
+    err = at_send_command(cmd, NULL);
+    free(cmd);
+    if (err < 0) {
+        err = at_send_command("AT+COPS=0",NULL);
+        if (err < 0)
+            goto error;
+    }
+
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, NULL, 0);
+    return;
+
+error:
+    RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
+}
+
+/**
+ * RIL_REQUEST_SET_PREFERRED_NETWORK_TYPE
+ *
+ * Requests to set the preferred network type for searching and registering
+ * (CS/PS domain, RAT, and operation mode).
+ */
+static void requestSetPreferredNetworkType(void *data, size_t datalen, RIL_Token t)
+{
+    int rat,err;
+    const char* cmd;
+
+    assert (datalen >= sizeof(int *));
+    rat = ((int *)data)[0];
+
+    /* Huawei specific
+        AT^SYSCFG=2,1,3FFFFFFF,2,4 for GPRS/EDGE Preferred
+        AT^SYSCFG=2,2,3FFFFFFF,2,4 for 3G Preferred
+        AT^SYSCFG=13,1,3FFFFFFF,2,4 for GPRS/EDGE Only
+        AT^SYSCFG=14,2,3FFFFFFF,2,4 for 3G Only
+
+        The third parameter, 0x3FFFFFFF tells the card to use all bands.
+        A value of 0x400380 here means GSM900/1800/WCDMA2100 only and a
+        value of 0x200000 here means GSM1900 only.
+
+    */
+
+    goto gm323;
+    switch (rat) {
+        case PREF_NET_TYPE_GSM_ONLY:  /* GSM only */
+            cmd = "AT^SYSCFG=13,1,3FFFFFFF,2,4"; /* for GPRS/EDGE Only */
+            break;
+        case PREF_NET_TYPE_GSM_WCDMA: /* WCDMA only */
+            cmd = "AT^SYSCFG=14,2,3FFFFFFF,2,4"; /* for 3G Only */
+            break;
+        case PREF_NET_TYPE_GSM_WCDMA_AUTO:
+        default:    /* Dual Mode - WCDMA preferred*/
+            cmd = "AT^SYSCFG=2,2,3FFFFFFF,2,4";  /* for 3G Preferred */
+            break;
+    }
+
+    /* Set mode */
+//    err = at_send_command(cmd);
+//    if (err != AT_NOERROR)
+//        goto error;
+
+gm323:
+    /* Trigger autoregister */
+//    err = at_send_command("AT+COPS=0");
+//    if (err != AT_NOERROR)
+//        goto error;
+
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, NULL, sizeof(int));
+    return;
+
+error:
+    LOGE("ERROR: requestSetPreferredNetworkType() failed\n");
+    RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
+}
+
+/**
+ * RIL_REQUEST_GET_PREFERRED_NETWORK_TYPE
+ *
+ * Query the preferred network type (CS/PS domain, RAT, and operation mode)
+ * for searching and registering.
+ */
+static void requestGetPreferredNetworkType(RIL_Token t)
+{
+    /*
+    AT^SYSCFG=2,1,3FFFFFFF,1,2 for GPRS/EDGE Preferred
+    AT^SYSCFG=2,2,3FFFFFFF,1,2 for 3G Preferred
+    AT^SYSCFG=13,1,3FFFFFFF,1,2 for GPRS/EDGE Only
+    AT^SYSCFG=14,2,3FFFFFFF,1,2 for 3G Only
+    */
+
+    int response = PREF_NET_TYPE_GSM_ONLY;
+
+    D("requestGetPreferredNetworkType() mode:%d\n",response);
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, &response, sizeof(int));
+    return;
+}
+
+static void requestSetNetworkSelectionAutomatic(RIL_Token t)
+{
+    int err;
+    err = at_send_command("AT+COPS=0",NULL);
+    if (err < 0)
+        goto error;
+
+    RIL_onRequestComplete(t, RIL_E_SUCCESS, NULL, 0);
+error:
+    RIL_onRequestComplete(t, RIL_E_GENERIC_FAILURE, NULL, 0);
+}
 
 /*** Callback methods from the RIL library to us ***/
 
@@ -1439,7 +1850,7 @@ onRequest (int request, void *data, size_t datalen, RIL_Token t)
             break;
 
         case RIL_REQUEST_SIGNAL_STRENGTH:
-            requestSignalStrength(data, datalen, t);
+            requestSignalStrength(t);
             break;
         case RIL_REQUEST_VOICE_REGISTRATION_STATE:
         case RIL_REQUEST_DATA_REGISTRATION_STATE:
@@ -1464,7 +1875,10 @@ onRequest (int request, void *data, size_t datalen, RIL_Token t)
             requestSendSMS(data, datalen, t);
             break;
         case RIL_REQUEST_SETUP_DATA_CALL:
-            requestSetupDataCall(data, datalen, t);
+            requestSetupDefaultPDP(data, datalen, t);
+            break;
+        case RIL_REQUEST_DEACTIVATE_DATA_CALL:
+            requestDeactivateDefaultPDP(data, datalen, t);
             break;
         case RIL_REQUEST_SMS_ACKNOWLEDGE:
             requestSMSAcknowledge(data, datalen, t);
@@ -1518,7 +1932,23 @@ onRequest (int request, void *data, size_t datalen, RIL_Token t)
             break;
 
         case RIL_REQUEST_SET_NETWORK_SELECTION_AUTOMATIC:
-            at_send_command("AT+COPS=0", NULL);
+            requestSetNetworkSelectionAutomatic(t);
+            break;
+
+        case RIL_REQUEST_SET_NETWORK_SELECTION_MANUAL:
+            requestSetNetworkSelectionManual(data, datalen, t);
+            break;
+
+        case RIL_REQUEST_GET_PREFERRED_NETWORK_TYPE:
+            requestGetPreferredNetworkType(t);
+            break;
+
+        case RIL_REQUEST_SET_PREFERRED_NETWORK_TYPE:
+            requestSetPreferredNetworkType(data, datalen, t);
+            break;
+
+        case RIL_REQUEST_QUERY_AVAILABLE_NETWORKS:
+            requestQueryAvailableNetworks(t);
             break;
 
         case RIL_REQUEST_DATA_CALL_LIST:
@@ -1940,7 +2370,7 @@ static void initializeCallback(void *param)
     at_send_command("AT+COLP=0", NULL);
 
     /*  HEX character set */
-    at_send_command("AT+CSCS=\"HEX\"", NULL);
+    at_send_command("AT+CSCS=\"IRA\"", NULL);
 
     /*  USSD unsolicited */
     at_send_command("AT+CUSD=1", NULL);
@@ -2132,11 +2562,14 @@ mainLoop(void *param)
                                             SOCK_STREAM );
             } else if (s_device_path != NULL) {
                 fd = open (s_device_path, O_RDWR);
+//                fd = open (s_device_path, O_RDWR | O_NONBLOCK);
                 if (fd >= 0) {
                     /* disable echo on serial ports */
                     struct termios  ios;
                     tcgetattr( fd, &ios );
                     ios.c_lflag = 0;  /* disable ECHO, ICANON, etc... */
+                    cfsetispeed(&ios, B115200);        //¿¿¿¿¿¿¿¿9600
+                    cfsetospeed(&ios, B115200);        //¿¿¿¿¿¿¿¿9600
                     tcsetattr( fd, TCSANOW, &ios );
                 }
             }

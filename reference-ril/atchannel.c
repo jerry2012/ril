@@ -79,7 +79,9 @@ void  AT_DUMP(const char*  prefix, const char*  buff, int  len)
  */
 
 static pthread_mutex_t s_commandmutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t gsm_commandmutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t s_commandcond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t gsm_commandcond = PTHREAD_COND_INITIALIZER;
 
 static ATCommandType s_type;
 static const char *s_responsePrefix = NULL;
@@ -434,11 +436,30 @@ static void onReaderClosed()
     }
 }
 
+static int at_port = 0;
+
+void at_change(int at)
+{
+    pthread_mutex_lock(&gsm_commandmutex);
+    at_port = at;
+    if(at == 0){
+        pthread_cond_signal(&gsm_commandcond);
+    }
+    pthread_mutex_unlock(&gsm_commandmutex);
+}
+
+int at_change_get(void)
+{
+    return at_port;
+}
 
 static void *readerLoop(void *arg)
 {
     for (;;) {
         const char * line;
+
+        if(at_port)
+            pthread_cond_wait(&gsm_commandcond, NULL);
 
         line = readline();
 
