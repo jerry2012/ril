@@ -1176,7 +1176,7 @@ static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
 //    at_response_free(atResponse);
 //    atResponse = NULL;
     sleep(1);
-    at_change(1);
+    at_change(true);
 //  if (err != AT_NOERROR) {
 //      goto error;
 //  }
@@ -1201,6 +1201,7 @@ static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
         goto error;
     }
 
+    set_ppp_status(true);
     property_get("net.ppp0.local-ip", ppp_local_ip, NULL);
     property_get("net.ppp0.dns1", ppp_dns1, NULL);
     property_get("net.ppp0.dns2", ppp_dns2, NULL);
@@ -1381,12 +1382,17 @@ static int killConn(const char * cid)
 //        goto error;
 //    }
     property_set("ctl.start", "gsm_reset");
-    if (wait_for_property("init.svc.gsm_reset", "running", 10) < 0) {
+    if (wait_for_property("init.svc.gsm_reset", "stopped", 10) < 0) {
         LOGE("Timeout waiting init.svc.gsm_reset - giving up!\n");
     }
-    sleep(10);
-    at_change(0);
-    sleep(1);
+    at_change(false);
+
+    at_send_command("AT",NULL);
+    err = 3;
+    while (err-- > 0 && (get_ppp_status() == true)) {
+        LOGD("Wait for ppp stop.");
+        sleep(1);
+    }
     at_send_command("ATE0",NULL);
 //    at_send_command("ATH",NULL);
 
@@ -2329,6 +2335,19 @@ static void initializeCallback(void *param)
 
     setRadioState (RADIO_STATE_OFF);
 
+    err = open ("/sys/class/gpio/gpio117/value", O_RDWR);
+    if (err >= 0) {
+        LOGD("Turn on gsm modem power.");
+        write(err, "1", 1);
+        close(err);
+    }
+
+    err = 10;
+    while (err-- > 0 && (get_gsm_status() == false)) {
+        LOGD("Wait for gsm modem start.");
+        sleep(1);
+    }
+
     at_handshake();
 
     /* note: we don't check errors here. Everything important will
@@ -2568,8 +2587,8 @@ mainLoop(void *param)
                     struct termios  ios;
                     tcgetattr( fd, &ios );
                     ios.c_lflag = 0;  /* disable ECHO, ICANON, etc... */
-                    cfsetispeed(&ios, B115200);        //¿¿¿¿¿¿¿¿9600
-                    cfsetospeed(&ios, B115200);        //¿¿¿¿¿¿¿¿9600
+                    cfsetispeed(&ios, B115200);
+                    cfsetospeed(&ios, B115200);
                     tcsetattr( fd, TCSANOW, &ios );
                 }
             }

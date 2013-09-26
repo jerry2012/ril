@@ -28,6 +28,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdbool.h>
 
 #define LOG_NDEBUG 0
 #define LOG_TAG "AT"
@@ -436,21 +437,43 @@ static void onReaderClosed()
     }
 }
 
-static int at_port = 0;
+static bool at_port = false;
+static bool gsm_start = false;
+static bool ppp_start = false;
 
-void at_change(int at)
+void at_change(bool at)
 {
     pthread_mutex_lock(&gsm_commandmutex);
     at_port = at;
-    if(at == 0){
+    if(at == false){
         pthread_cond_signal(&gsm_commandcond);
     }
     pthread_mutex_unlock(&gsm_commandmutex);
 }
 
-int at_change_get(void)
+bool at_change_get(void)
 {
     return at_port;
+}
+
+void set_gsm_status(bool st)
+{
+    gsm_start = st;
+}
+
+bool get_gsm_status(void)
+{
+    return gsm_start;
+}
+
+void set_ppp_status(bool st)
+{
+    ppp_start = st;
+}
+
+bool get_ppp_status(void)
+{
+    return ppp_start;
 }
 
 static void *readerLoop(void *arg)
@@ -462,6 +485,14 @@ static void *readerLoop(void *arg)
             pthread_cond_wait(&gsm_commandcond, NULL);
 
         line = readline();
+
+        if (0 == strcmp(line,"^SYSSTART")) {
+            set_gsm_status(true);
+        }
+
+        if (0 == strcmp(line,"NO CARRIER")) {
+            set_ppp_status(false);
+        }
 
         if (line == NULL) {
             break;
