@@ -384,7 +384,8 @@ static const char *readline()
         do {
             count = read(s_fd, p_read,
                             MAX_AT_RESPONSE - (p_read - s_ATBuffer));
-        } while (count < 0 && errno == EINTR);
+//        } while (count < 0 && errno == EINTR);
+    } while (count < 0 && errno == EINTR || *p_read == 0);//some mg323 output 0
 
         if (count > 0) {
             AT_DUMP( "<< ", p_read, count );
