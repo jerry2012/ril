@@ -955,8 +955,13 @@ static void requestRegistrationState(int request, void *data,
     asprintf(&responseStr[1], "%x", response[1]);
     asprintf(&responseStr[2], "%x", response[2]);
 
-    if (count > 3)
-        asprintf(&responseStr[3], "%d", response[3]);
+    if (request == RIL_REQUEST_DATA_REGISTRATION_STATE) {
+        count = 4;
+//    if (count > 3) //mg323
+        asprintf(&responseStr[1], "%x", 1);
+        asprintf(&responseStr[2], "%x", 2);
+        asprintf(&responseStr[3], "%d", 1);
+    }
 
     RIL_onRequestComplete(t, RIL_E_SUCCESS, responseStr, count*sizeof(char*));
     at_response_free(p_response);
