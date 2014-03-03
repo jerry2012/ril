@@ -778,33 +778,25 @@ static void requestSignalStrength(RIL_Token t)
     signalStrength.LTE_SignalStrength.rssnr = 0x7FFFFFFF;
     signalStrength.LTE_SignalStrength.cqi = 0x7FFFFFFF;
 
-    if(at_change_get()){
-        rssi = 31;
-        ber = 99;
-        signalStrength.GW_SignalStrength.signalStrength = rssi;
-        signalStrength.GW_SignalStrength.bitErrorRate = ber;
-    }
-    else{
-        err = at_send_command_singleline("AT+CSQ", "+CSQ:", &atResponse);
-        if (err < 0)
-            goto error;
+    err = at_send_command_singleline("AT+CSQ", "+CSQ:", &atResponse);
+    if (err < 0)
+      goto error;
 
-        line = atResponse->p_intermediates->line;
+    line = atResponse->p_intermediates->line;
 
-        err = at_tok_start(&line);
-        if (err < 0) goto error;
+    err = at_tok_start(&line);
+    if (err < 0) goto error;
 
-        err = at_tok_nextint(&line,&rssi);
-        if (err < 0) goto error;
+    err = at_tok_nextint(&line,&rssi);
+    if (err < 0) goto error;
 
-        signalStrength.GW_SignalStrength.signalStrength = rssi;
+    signalStrength.GW_SignalStrength.signalStrength = rssi;
 
-        err = at_tok_nextint(&line, &ber);
-        if (err < 0)
-            goto error;
+    err = at_tok_nextint(&line, &ber);
+    if (err < 0)
+      goto error;
 
-        signalStrength.GW_SignalStrength.bitErrorRate = ber;
-    }
+    signalStrength.GW_SignalStrength.bitErrorRate = ber;
 
     signalStrength.CDMA_SignalStrength.dbm = 0;
     signalStrength.CDMA_SignalStrength.ecio = 0;
@@ -1175,13 +1167,11 @@ static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
 
     /* Start data on PDP context 1 */
 //    err = at_send_command("ATD*99***1#");
-    err = at_send_command("ATE1",NULL);
+    //err = at_send_command("ATE1",NULL);
 //    ATResponse *atResponse = NULL;
 //    err = at_send_command_singleline("AT+CSQ", "+CSQ:", &atResponse);
 //    at_response_free(atResponse);
 //    atResponse = NULL;
-    sleep(1);
-    at_change(true);
 //  if (err != AT_NOERROR) {
 //      goto error;
 //  }
@@ -1206,7 +1196,6 @@ static void requestSetupDefaultPDP(void *data, size_t datalen, RIL_Token t)
         goto error;
     }
 
-    set_ppp_status(true);
     property_get("net.ppp0.local-ip", ppp_local_ip, NULL);
     property_get("net.ppp0.dns1", ppp_dns1, NULL);
     property_get("net.ppp0.dns2", ppp_dns2, NULL);
@@ -1390,15 +1379,9 @@ static int killConn(const char * cid)
     if (wait_for_property("init.svc.gsm_reset", "stopped", 10) < 0) {
         LOGE("Timeout waiting init.svc.gsm_reset - giving up!\n");
     }
-    at_change(false);
 
-    at_send_command("AT",NULL);
-    err = 3;
-    while (err-- > 0 && (get_ppp_status() == true)) {
-        LOGD("Wait for ppp stop.");
-        sleep(1);
-    }
-    at_send_command("ATE0",NULL);
+    //at_send_command("AT",NULL);
+    //at_send_command("ATE0",NULL);
 //    at_send_command("ATH",NULL);
 
     LOGD("killall pppd finished");
@@ -2345,12 +2328,6 @@ static void initializeCallback(void *param)
         LOGD("Turn on gsm modem power.");
         write(err, "1", 1);
         close(err);
-    }
-
-    err = 10;
-    while (err-- > 0 && (get_gsm_status() == false)) {
-        LOGD("Wait for gsm modem start.");
-        sleep(1);
     }
 
     at_handshake();

@@ -80,9 +80,7 @@ void  AT_DUMP(const char*  prefix, const char*  buff, int  len)
  */
 
 static pthread_mutex_t s_commandmutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t gsm_commandmutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t s_commandcond = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t gsm_commandcond = PTHREAD_COND_INITIALIZER;
 
 static ATCommandType s_type;
 static const char *s_responsePrefix = NULL;
@@ -438,62 +436,12 @@ static void onReaderClosed()
     }
 }
 
-static bool at_port = false;
-static bool gsm_start = false;
-static bool ppp_start = false;
-
-void at_change(bool at)
-{
-    pthread_mutex_lock(&gsm_commandmutex);
-    at_port = at;
-    if(at == false){
-        pthread_cond_signal(&gsm_commandcond);
-    }
-    pthread_mutex_unlock(&gsm_commandmutex);
-}
-
-bool at_change_get(void)
-{
-    return at_port;
-}
-
-void set_gsm_status(bool st)
-{
-    gsm_start = st;
-}
-
-bool get_gsm_status(void)
-{
-    return gsm_start;
-}
-
-void set_ppp_status(bool st)
-{
-    ppp_start = st;
-}
-
-bool get_ppp_status(void)
-{
-    return ppp_start;
-}
-
 static void *readerLoop(void *arg)
 {
     for (;;) {
         const char * line;
 
-        if(at_port)
-            pthread_cond_wait(&gsm_commandcond, NULL);
-
         line = readline();
-
-        if (0 == strcmp(line,"^SYSSTART")) {
-            set_gsm_status(true);
-        }
-
-        if (0 == strcmp(line,"NO CARRIER")) {
-            set_ppp_status(false);
-        }
 
         if (line == NULL) {
             break;
